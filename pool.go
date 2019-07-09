@@ -10,6 +10,20 @@ import (
 	"google.golang.org/grpc"
 )
 
+// IPool grpc pool behavior set
+type IPool interface {
+	// Get obtain one *ClientConn
+	Get(ctx context.Context) (*ClientConn, error)
+	// IsClosed pool is closed or not
+	IsClosed() bool
+	// Close close the pool
+	Close()
+	// Capacity
+	Capacity() int
+	// Capacity
+	Available() int
+}
+
 var (
 	// ErrClosed is the error when the client pool is closed
 	ErrClosed = errors.New("grpc pool: client pool is closed")
