@@ -10,6 +10,29 @@ import (
 	"google.golang.org/grpc"
 )
 
+// IPool grpc pool behavior set
+type IPool interface {
+	// Get obtain one *ClientConn
+	Get(ctx context.Context) (*ClientConn, error)
+	// IsClosed pool is closed or not
+	IsClosed() bool
+	// Close close the pool
+	Close()
+	// Capacity
+	Capacity() int
+	// Capacity
+	Available() int
+}
+
+// PoolConfig pool param config
+type PoolConfig struct {
+	Factory         Factory       // build grpc dial
+	IdleTimeout     time.Duration // max idle time for per grpc conn
+	MaxLifeDuration time.Duration // max ttl for  per grpc conn
+	Init            int           // init num
+	Capacity        int           // max num
+}
+
 var (
 	// ErrClosed is the error when the client pool is closed
 	ErrClosed = errors.New("grpc pool: client pool is closed")
@@ -24,8 +47,8 @@ var (
 // Factory is a function type creating a grpc client
 type Factory func() (*grpc.ClientConn, error)
 
-// Pool is the grpc client pool
-type Pool struct {
+// pool is the grpc client pool
+type pool struct {
 	clients         chan ClientConn
 	factory         Factory
 	idleTimeout     time.Duration
@@ -36,7 +59,7 @@ type Pool struct {
 // ClientConn is the wrapper for a grpc client conn
 type ClientConn struct {
 	*grpc.ClientConn
-	pool          *Pool
+	pool          *pool
 	timeUsed      time.Time
 	timeInitiated time.Time
 	unhealthy     bool
@@ -45,28 +68,25 @@ type ClientConn struct {
 // New creates a new clients pool with the given initial amd maximum capacity,
 // and the timeout for the idle clients. Returns an error if the initial
 // clients could not be created
-func New(factory Factory, init, capacity int, idleTimeout time.Duration,
-	maxLifeDuration ...time.Duration) (*Pool, error) {
+func New(pc PoolConfig) (*pool, error) {
 
-	if capacity <= 0 {
-		capacity = 1
+	if pc.Capacity <= 0 {
+		pc.Capacity = 1
 	}
-	if init < 0 {
-		init = 0
+	if pc.Init < 0 {
+		pc.Init = 0
 	}
-	if init > capacity {
-		init = capacity
+	if pc.Init > pc.Capacity {
+		pc.Init = pc.Capacity
 	}
-	p := &Pool{
-		clients:     make(chan ClientConn, capacity),
-		factory:     factory,
-		idleTimeout: idleTimeout,
+	p := &pool{
+		clients:     make(chan ClientConn, pc.Capacity),
+		factory:     pc.Factory,
+		idleTimeout: pc.IdleTimeout,
 	}
-	if len(maxLifeDuration) > 0 {
-		p.maxLifeDuration = maxLifeDuration[0]
-	}
-	for i := 0; i < init; i++ {
-		c, err := factory()
+
+	for i := 0; i < pc.Init; i++ {
+		c, err := pc.Factory()
 		if err != nil {
 			return nil, err
 		}
@@ -79,7 +99,7 @@ func New(factory Factory, init, capacity int, idleTimeout time.Duration,
 		}
 	}
 	// Fill the rest of the pool with empty clients
-	for i := 0; i < capacity-init; i++ {
+	for i := 0; i < pc.Capacity-pc.Init; i++ {
 		p.clients <- ClientConn{
 			pool: p,
 		}
@@ -87,7 +107,7 @@ func New(factory Factory, init, capacity int, idleTimeout time.Duration,
 	return p, nil
 }
 
-func (p *Pool) getClients() chan ClientConn {
+func (p *pool) getClients() chan ClientConn {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
@@ -98,7 +118,7 @@ func (p *Pool) getClients() chan ClientConn {
 // You can call Close while there are outstanding clients.
 // It waits for all clients to be returned (Close).
 // The pool channel is then closed, and Get will not be allowed anymore
-func (p *Pool) Close() {
+func (p *pool) Close() {
 	p.mu.Lock()
 	clients := p.clients
 	p.clients = nil
@@ -109,8 +129,7 @@ func (p *Pool) Close() {
 	}
 
 	close(clients)
-	for i := 0; i < p.Capacity(); i++ {
-		client := <-clients
+	for client := range clients {
 		if client.ClientConn == nil {
 			continue
 		}
@@ -119,7 +138,7 @@ func (p *Pool) Close() {
 }
 
 // IsClosed returns true if the client pool is closed.
-func (p *Pool) IsClosed() bool {
+func (p *pool) IsClosed() bool {
 	return p == nil || p.getClients() == nil
 }
 
@@ -127,7 +146,7 @@ func (p *Pool) IsClosed() bool {
 // has not been reached, it will create a new one using the factory. Otherwise,
 // it will wait till the next client becomes available or a timeout.
 // A timeout of 0 is an indefinite wait
-func (p *Pool) Get(ctx context.Context) (*ClientConn, error) {
+func (p *pool) Get(ctx context.Context) (*ClientConn, error) {
 	clients := p.getClients()
 	if clients == nil {
 		return nil, ErrClosed
@@ -225,7 +244,7 @@ func (c *ClientConn) Close() error {
 }
 
 // Capacity returns the capacity
-func (p *Pool) Capacity() int {
+func (p *pool) Capacity() int {
 	if p.IsClosed() {
 		return 0
 	}
@@ -233,7 +252,7 @@ func (p *Pool) Capacity() int {
 }
 
 // Available returns the number of currently unused clients
-func (p *Pool) Available() int {
+func (p *pool) Available() int {
 	if p.IsClosed() {
 		return 0
 	}
