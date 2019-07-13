@@ -129,8 +129,7 @@ func (p *pool) Close() {
 	}
 
 	close(clients)
-	for i := 0; i < p.Capacity(); i++ {
-		client := <-clients
+	for client := range clients {
 		if client.ClientConn == nil {
 			continue
 		}
